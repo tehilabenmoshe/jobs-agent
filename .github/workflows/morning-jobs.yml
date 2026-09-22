@@ -1,0 +1,36 @@
+name: Morning jobs
+
+on:
+  schedule:
+    # 05:00 UTC = 08:00 בישראל בשעון קיץ (06:00 UTC בשעון חורף)
+    - cron: "0 5 * * *"
+  workflow_dispatch: # מאפשר להריץ ידנית מלשונית Actions
+
+permissions:
+  contents: write # כדי לשמור את רשימת המשרות שכבר נשלחו
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install anthropic
+
+      - name: Find jobs and send email
+        run: python scripts/morning_jobs.py
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          CV_TEXT: ${{ secrets.CV_TEXT }}
+
+      - name: Save sent jobs (avoid duplicates tomorrow)
+        run: |
+          git config user.name "jobs-bot"
+          git config user.email "jobs-bot@users.noreply.github.com"
+          git add data/seen_jobs.json
+          git diff --staged --quiet || (git commit -m "Update seen jobs" && git push)
