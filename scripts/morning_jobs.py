@@ -33,8 +33,14 @@ Find NEW, currently open job postings in {location} (remote roles that hire from
 - Field: full-stack, AI / ML engineering, or front-end development.
 
 Search widely: company career pages, LinkedIn, Drushim, AllJobs, Comeet, Greenhouse, Lever and similar boards.
-Only include postings you actually saw in search results, with a direct link. Never invent a job or a URL.
 Prefer postings from the last 7 days.
+
+CRITICAL — verify before including a job:
+1. Use web_fetch to actually open every candidate posting's page, not just its search snippet.
+2. Read the fetched page itself. If it says the role is closed, filled, expired, no longer accepting applications, or similar (in any language — e.g. "position filled", "no longer available", "המשרה אוישה", "המשרה נסגרה", "הגיוס למשרה זו הסתיים"), DROP that job entirely — do not include it.
+3. If a page fails to load or you cannot confirm it is still open, drop it rather than guessing.
+4. Only include a job in your final answer once you have fetched its page and confirmed with your own eyes that it is still accepting applications.
+Never include a job you only saw in a search snippet without fetching and checking its actual page.
 
 Also score each job from 0 to 100 for how well it fits this candidate's CV:
 
@@ -51,7 +57,7 @@ category ("fullstack" or "ai" or "frontend"),
 years_required (short string),
 match_score (integer 0-100),
 why_match (one short sentence in Hebrew naming the specific CV skills that match).
-If you found nothing, return []."""
+If you found nothing that is confirmed still open, return []."""
 
 
 def load_seen():
@@ -70,11 +76,15 @@ def ask_claude(prompt):
     client = anthropic.Anthropic()
     messages = [{"role": "user", "content": prompt}]
     resp = None
-    for _ in range(8):  # web search can pause long turns
+    for _ in range(15):  # search + fetch verification takes more turns
         resp = client.messages.create(
             model=MODEL,
             max_tokens=8000,
-            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 20}],
+            tools=[
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 25},
+                {"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 30},
+            ],
+            extra_headers={"anthropic-beta": "web-fetch-2025-09-10"},
             messages=messages,
         )
         if resp.stop_reason != "pause_turn":
