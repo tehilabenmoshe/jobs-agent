@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write # כדי לשמור את רשימת המשרות שכבר נשלחו
 
+concurrency:
+  group: morning-jobs
+  cancel-in-progress: false
+
 jobs:
   send:
     runs-on: ubuntu-latest
@@ -19,21 +23,22 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install anthropic
-
       - name: Find jobs and send email
         run: python scripts/morning_jobs.py
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           CV_TEXT: ${{ secrets.CV_TEXT }}
 
       - name: Save sent jobs (avoid duplicates tomorrow)
+        continue-on-error: true # לא קריטי - רק מונע כפילויות, לא משפיע על שליחת המייל
         run: |
           git config user.name "jobs-bot"
           git config user.email "jobs-bot@users.noreply.github.com"
           git add data/seen_jobs.json
           git diff --staged --quiet && exit 0
           git commit -m "Update seen jobs"
-          git pull --rebase origin main
-          git push
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push && break
+            echo "Retry $i..."; sleep 5
+          done
