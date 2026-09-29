@@ -1,0 +1,32 @@
+name: Tailor CV
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_url:
+        description: "קישור למשרה (אפשר להשאיר ריק אם מדביקים טקסט)"
+        required: false
+        default: ""
+      job_text:
+        description: "או: הדבקת תיאור המשרה (אם הקישור לא נקרא)"
+        required: false
+        default: ""
+
+jobs:
+  tailor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tailor CV and email it
+        run: python scripts/tailor_cv.py
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          CV_TEXT: ${{ secrets.CV_TEXT }}
+          JOB_URL: ${{ inputs.job_url }}
+          JOB_TEXT: ${{ inputs.job_text }}
