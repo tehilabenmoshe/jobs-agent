@@ -16,6 +16,7 @@ import re
 import smtplib
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import date
@@ -258,6 +259,70 @@ def llm_rank(cv, jobs):
     return {}
 
 
+# ---- מכתב מקדים ----------------------------------------------------------
+COVER_LETTER_MAX = 10  # כמה משרות (הכי מתאימות) יקבלו מכתב מקדים בכל מייל
+COVER_PACE_SECONDS = 25  # מרווח בין בקשות - המכסה החינמית מוגבלת בטוקנים לדקה
+
+LETTER_PROMPT = """Write a short cover letter (150-220 words) for the job below, from the candidate whose CV is given.
+
+STRICT RULES:
+- Use ONLY facts that appear in the CV. Never invent or inflate experience, employers, numbers, degrees, or skills.
+- If the job asks for something the CV does not show, simply do not mention it.
+- Be warm, professional and concrete: open with why this role/company, mention 2-3 specific things from the CV that match the job, close with a short call to action.
+- No placeholders like [Company] - use the real company and role names given below.
+- Write the letter in {lang}. Output only the letter itself, starting with the greeting. Sign with the candidate's name exactly as it appears in the CV.
+
+<cv>
+{cv}
+</cv>
+
+<job>
+Title: {title}
+Company: {company}
+Description: {desc}
+</job>"""
+
+
+def cover_letter(cv, job):
+    """Draft a cover letter with a free Groq model. Returns '' on any failure."""
+    key = os.environ.get("GROQ_API_KEY")
+    if not key:
+        return ""
+    lang = "Hebrew" if len(re.findall(r"[\u0590-\u05FF]", job["text"])) > 50 else "English"
+    prompt = LETTER_PROMPT.format(
+        cv=cv[:4500], title=job["title"], company=job["company"], desc=job["text"][:2500], lang=lang
+    )
+    for model in GROQ_MODELS:
+        for attempt in range(3):
+            try:
+                r = http_json(
+                    GROQ_URL,
+                    data={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.5,
+                        "max_tokens": 700,
+                    },
+                    headers={"Authorization": f"Bearer {key}"},
+                    timeout=90,
+                )
+                return r["choices"][0]["message"]["content"].strip()
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < 2:
+                    try:
+                        wait = float(e.headers.get("retry-after") or 30)
+                    except (TypeError, ValueError):
+                        wait = 30
+                    time.sleep(min(65, wait) + 1)
+                    continue
+                print(f"Cover letter {model}: HTTP {e.code}")
+                break
+            except Exception as e:
+                print(f"Cover letter {model}: {e}")
+                break
+    return ""
+
+
 # ---- מייל ----------------------------------------------------------------
 def esc(v):
     return html.escape(str(v or ""))
@@ -267,13 +332,20 @@ def card(j):
     url = html.escape(j["url"].strip(), quote=True)
     yrs = "לא צוין" if j.get("years") is None else f"{j['years']}"
     why = f'<div style="color:#333;margin-top:4px">{esc(j.get("why_match"))}</div>' if j.get("why_match") else ""
+    letter = ""
+    if j.get("cover_letter"):
+        letter = (
+            '<div style="margin-top:8px;color:#666;font-size:13px">מכתב מקדים (טיוטה - כדאי לקרוא ולעדכן לפני ההגשה):</div>'
+            '<div dir="auto" style="white-space:pre-wrap;background:#f7f7f7;border-radius:6px;padding:8px 10px;'
+            f'margin-top:4px;font-size:14px">{esc(j["cover_letter"])}</div>'
+        )
     return (
         '<div style="border:1px solid #ddd;border-radius:8px;padding:10px 12px;margin:8px 0">'
         f'<a href="{url}" style="font-size:16px;font-weight:bold;text-decoration:none">{esc(j["title"])}</a>'
         f' <span style="color:#666">· התאמה {esc(j.get("match_score"))}%</span>'
         f'<div style="color:#555">{esc(j.get("company"))} · {esc(j.get("location"))} · '
         f'{esc(j.get("category"))} · שנות ניסיון שנדרשו: {esc(yrs)}</div>'
-        f"{why}</div>"
+        f"{why}{letter}</div>"
     )
 
 
@@ -332,6 +404,13 @@ def main():
 
     cands.sort(key=lambda j: j["match_score"], reverse=True)
     new = cands[:MAX_EMAIL]
+    if os.environ.get("GROQ_API_KEY"):
+        for n, j in enumerate(new[:COVER_LETTER_MAX]):
+            if n:
+                time.sleep(COVER_PACE_SECONDS)
+            j["cover_letter"] = cover_letter(cv, j)
+        print(f"Cover letters: {sum(1 for j in new if j.get('cover_letter'))}/{min(len(new), COVER_LETTER_MAX)}")
+
     strong = [j for j in new if j["match_score"] >= STRONG_MATCH]
     others = [j for j in new if j["match_score"] < STRONG_MATCH]
 
