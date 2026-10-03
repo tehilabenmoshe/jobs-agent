@@ -18,6 +18,7 @@ import ssl
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date
 from email.header import Header
@@ -45,7 +46,17 @@ LOCATION_WORDS = [
     "israel", "tel aviv", "tel-aviv", "herzliya", "haifa", "jerusalem", "ramat gan",
     "petah tikva", "petach tikva", "raanana", "ra'anana", "netanya", "rehovot",
     "beer sheva", "be'er sheva", "hod hasharon", "kfar saba", "yokneam", "rosh haayin",
-    "givatayim", "bnei brak", "holon", "modiin", "ישראל", "תל אביב",
+    "givatayim", "bnei brak", "holon", "modiin", "modi'in", "ישראל", "תל אביב",
+    "lod", "be'er ya'akov", "beer yaakov", "beer ya'akov", "ramla", "rishon", "ness ziona",
+    "yavne", "gedera", "shoham", "airport city", "or yehuda", "yehud", "kiryat ono",
+    "לוד", "באר יעקב", "רמלה", "ראשון לציון", "נס ציונה", "יבנה",
+]
+# עיירות קרובות אלייך - משרות משם מסומנות 📍 ומקבלות בונוס קטן בדירוג (אפשר לערוך)
+NEAR_WORDS = [
+    "lod", "be'er ya'akov", "beer yaakov", "beer ya'akov", "ramla", "rishon", "rehovot",
+    "ness ziona", "yavne", "gedera", "shoham", "airport city", "or yehuda", "yehud",
+    "kiryat ono", "modiin", "modi'in", "petah tikva", "petach tikva",
+    "לוד", "באר יעקב", "רמלה", "ראשון לציון", "רחובות", "נס ציונה", "יבנה", "מודיעין",
 ]
 FIELD_RE = re.compile(
     r"full[\s-]?stack|front[\s-]?end|\bai\b|\bml\b|machine learning|\bllm\b|"
@@ -111,6 +122,7 @@ def fetch_greenhouse(c):
             "company": c["name"],
             "location": (j.get("location") or {}).get("name", ""),
             "url": j.get("absolute_url", ""),
+            "source": "Greenhouse",
             "text": strip_html(j.get("content", "")),
         }
 
@@ -126,6 +138,7 @@ def fetch_lever(c, host="api.lever.co"):
             "company": c["name"],
             "location": (j.get("categories") or {}).get("location", "") or "",
             "url": j.get("hostedUrl", ""),
+            "source": "Lever",
             "text": strip_html(j.get("descriptionPlain", "")) + " " + extra,
         }
 
@@ -155,10 +168,81 @@ def fetch_all(companies):
     return jobs, len(companies) - failed, failed
 
 
+# ---- JSearch (LinkedIn / Indeed / Glassdoor דרך RapidAPI) ----------------
+JSEARCH_URL = "https://jsearch.p.rapidapi.com/search"
+JSEARCH_ROLES = ["junior full stack developer", "junior front end developer", "junior AI engineer"]
+JSEARCH_ANCHOR = "Lod, Israel"  # נקודת המוצא לחיפוש לפי מרחק
+JSEARCH_RADIUS_KM = 30
+# 3 שאילתות ביום ~ 90 בקשות בחודש, בתוך המכסה החינמית (200)
+
+
+def fetch_jsearch():
+    key = os.environ.get("RAPIDAPI_KEY")
+    if not key:
+        print("JSearch: no RAPIDAPI_KEY secret - skipped")
+        return []
+    jobs = []
+    for role in JSEARCH_ROLES:
+        q = urllib.parse.urlencode({
+            "query": f"{role} in {JSEARCH_ANCHOR}",
+            "page": "1",
+            "num_pages": "1",
+            "country": "il",
+            "date_posted": "3days",
+            "radius": str(JSEARCH_RADIUS_KM),
+            "job_requirements": "under_3_years_experience",
+        })
+        try:
+            d = http_json(
+                f"{JSEARCH_URL}?{q}",
+                headers={"X-RapidAPI-Key": key, "X-RapidAPI-Host": "jsearch.p.rapidapi.com"},
+            )
+        except urllib.error.HTTPError as e:
+            print(f"JSearch '{role}': HTTP {e.code}")
+            if e.code in (401, 403, 429):  # מפתח שגוי / מכסה נגמרה - אין טעם להמשיך
+                break
+            continue
+        except Exception as e:
+            print(f"JSearch '{role}': {e}")
+            continue
+        got = 0
+        for x in d.get("data") or []:
+            url = x.get("job_apply_link") or x.get("job_google_link") or ""
+            city = (x.get("job_city") or "").strip()
+            jobs.append({
+                "title": x.get("job_title") or "",
+                "company": x.get("employer_name") or "",
+                "location": f"{city}, Israel" if city else "Israel",
+                "url": url,
+                "text": x.get("job_description") or "",
+                "source": x.get("job_publisher") or "JSearch",
+                "verify": True,
+            })
+            got += 1
+        print(f"JSearch '{role}': {got} jobs")
+    return jobs
+
+
 # ---- סינון ---------------------------------------------------------------
+def _words_re(words):
+    return re.compile("|".join(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])" for w in words), re.I)
+
+
+_ISRAEL_RE = _words_re(LOCATION_WORDS)
+_NEAR_RE = _words_re(NEAR_WORDS)
+
+
 def in_israel(loc):
-    loc = (loc or "").lower()
-    return any(w in loc for w in LOCATION_WORDS)
+    return bool(_ISRAEL_RE.search(loc or ""))
+
+
+def is_near(loc):
+    return bool(_NEAR_RE.search(loc or ""))
+
+
+def job_key(j):
+    """Same company+title+place = same job, even if two sites link to it differently."""
+    return "|".join(str(j.get(k, "")).strip().lower() for k in ("company", "title", "location"))
 
 
 def required_years(text):
@@ -201,6 +285,7 @@ def prefilter(jobs):
             continue
         j["years"] = yrs
         j["category"] = category(j["title"])
+        j["near"] = is_near(j["location"])
         out.append(j)
     stats["final"] = len(out)
     return out, stats
@@ -341,7 +426,13 @@ def esc(v):
 def card(j):
     url = html.escape(j["url"].strip(), quote=True)
     yrs = "לא צוין" if j.get("years") is None else f"{j['years']}"
+    where = ("📍 " if j.get("near") else "") + esc(j.get("location"))
     why = f'<div style="color:#333;margin-top:4px">{esc(j.get("why_match"))}</div>' if j.get("why_match") else ""
+    verify = (
+        '<div style="color:#a60;font-size:12px;margin-top:4px">המשרה הגיעה ממאגר חיצוני - כדאי לוודא בקישור שהיא עדיין פתוחה.</div>'
+        if j.get("verify")
+        else ""
+    )
     letter = ""
     if j.get("cover_letter"):
         letter = (
@@ -353,9 +444,9 @@ def card(j):
         '<div style="border:1px solid #ddd;border-radius:8px;padding:10px 12px;margin:8px 0">'
         f'<a href="{url}" style="font-size:16px;font-weight:bold;text-decoration:none">{esc(j["title"])}</a>'
         f' <span style="color:#666">· התאמה {esc(j.get("match_score"))}%</span>'
-        f'<div style="color:#555">{esc(j.get("company"))} · {esc(j.get("location"))} · '
-        f'{esc(j.get("category"))} · שנות ניסיון שנדרשו: {esc(yrs)}</div>'
-        f"{why}{letter}</div>"
+        f'<div style="color:#555">{esc(j.get("company"))} · {where} · '
+        f'{esc(j.get("category"))} · שנות ניסיון שנדרשו: {esc(yrs)} · מקור: {esc(j.get("source"))}</div>'
+        f"{why}{verify}{letter}</div>"
     )
 
 
@@ -369,7 +460,8 @@ def funnel_line(stats):
     )
     return (
         '<p style="color:#888;font-size:12px;margin-top:16px">'
-        f"נסרקו {stats['total']} משרות פתוחות מ-{stats['boards_ok']} חברות{failed}. "
+        f"נסרקו {stats['total']} משרות: {stats['total'] - stats.get('jsearch', 0)} מלוחות של "
+        f"{stats['boards_ok']} חברות{failed}, {stats.get('jsearch', 0)} מ-JSearch. "
         f"בישראל: {stats['israel']} · בתחומים שלך: {stats['field']} · בלי בכירים: {stats['junior']} · "
         f"עד {MAX_YEARS} שנות ניסיון: {stats['final']} · כבר נשלחו בעבר: {stats['already_sent']}.</p>"
     )
@@ -413,9 +505,19 @@ def main():
     today = date.today().isoformat()
 
     all_jobs, boards_ok, boards_failed = fetch_all(companies)
+    js_jobs = fetch_jsearch()
+    all_jobs += js_jobs  # משרות מלוחות החברות קודם, כך שהן מקבלות עדיפות בכפילויות
     pre, stats = prefilter(all_jobs)
-    cands = [j for j in pre if j["url"] not in known]
-    stats.update(boards_ok=boards_ok, boards_failed=boards_failed, already_sent=len(pre) - len(cands))
+    cands, keys = [], set()
+    for j in pre:
+        k = job_key(j)
+        if j["url"] in known or k in known or k in keys:
+            continue
+        keys.add(k)
+        cands.append(j)
+    stats.update(
+        boards_ok=boards_ok, boards_failed=boards_failed, jsearch=len(js_jobs), already_sent=len(pre) - len(cands)
+    )
     print(f"Fetched {len(all_jobs)} open jobs -> {len(cands)} new junior candidates")
     print(f"Funnel: {stats}")
 
@@ -432,6 +534,9 @@ def main():
             if why:
                 top[i]["why_match"] = why
 
+    for j in cands:
+        if j.get("near"):
+            j["match_score"] = min(100, j["match_score"] + 5)  # בונוס קטן למשרות קרובות
     cands.sort(key=lambda j: j["match_score"], reverse=True)
     new = cands[:MAX_EMAIL]
     if os.environ.get("GROQ_API_KEY"):
@@ -452,7 +557,7 @@ def main():
         subject = f"אין משרות חדשות היום · {today}"
 
     send_email(subject, build_email(strong, others, stats))
-    save_seen(seen + [j["url"] for j in new])  # שומרים רק אחרי שהמייל נשלח
+    save_seen(seen + [x for j in new for x in (j["url"], job_key(j))])  # שומרים רק אחרי שהמייל נשלח
     print(f"Sent: {len(strong)} strong, {len(others)} other")
 
 
