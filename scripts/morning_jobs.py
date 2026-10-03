@@ -131,7 +131,7 @@ def fetch_lever(c, host="api.lever.co"):
 
 
 def fetch_all(companies):
-    jobs, report = [], []
+    jobs, report, failed = [], [], 0
     for c in companies:
         src = c.get("source", "greenhouse")
         try:
@@ -146,11 +146,13 @@ def fetch_all(companies):
             jobs += got
             report.append(f"  ok   {c['name']} ({src}): {len(got)} jobs")
         except urllib.error.HTTPError as e:
+            failed += 1
             report.append(f"  FAIL {c['name']} ({src}/{c['token']}): HTTP {e.code} - בדקי את ה-token")
         except Exception as e:
+            failed += 1
             report.append(f"  FAIL {c['name']} ({src}/{c.get('token')}): {e}")
     print("Boards:\n" + "\n".join(report))
-    return jobs
+    return jobs, len(companies) - failed, failed
 
 
 # ---- סינון ---------------------------------------------------------------
@@ -181,19 +183,27 @@ def category(title):
 
 
 def prefilter(jobs):
+    """Returns (kept_jobs, stats) - stats shows how many jobs survive each filter."""
     out = []
+    stats = {"total": len(jobs), "israel": 0, "field": 0, "junior": 0}
     for j in jobs:
         if not j["url"].startswith("http") or not in_israel(j["location"]):
             continue
-        if not FIELD_RE.search(j["title"]) or SENIOR_RE.search(j["title"]):
+        stats["israel"] += 1
+        if not FIELD_RE.search(j["title"]):
             continue
+        stats["field"] += 1
+        if SENIOR_RE.search(j["title"]):
+            continue
+        stats["junior"] += 1
         yrs = required_years(j["text"])
         if yrs is not None and yrs > MAX_YEARS:
             continue
         j["years"] = yrs
         j["category"] = category(j["title"])
         out.append(j)
-    return out
+    stats["final"] = len(out)
+    return out, stats
 
 
 # ---- דירוג ---------------------------------------------------------------
@@ -349,7 +359,23 @@ def card(j):
     )
 
 
-def build_email(strong, others):
+def funnel_line(stats):
+    if not stats:
+        return ""
+    failed = (
+        f" ({stats['boards_failed']} חברות לא נטענו - כדאי לבדוק את ה-token ב-companies.json)"
+        if stats.get("boards_failed")
+        else ""
+    )
+    return (
+        '<p style="color:#888;font-size:12px;margin-top:16px">'
+        f"נסרקו {stats['total']} משרות פתוחות מ-{stats['boards_ok']} חברות{failed}. "
+        f"בישראל: {stats['israel']} · בתחומים שלך: {stats['field']} · בלי בכירים: {stats['junior']} · "
+        f"עד {MAX_YEARS} שנות ניסיון: {stats['final']} · כבר נשלחו בעבר: {stats['already_sent']}.</p>"
+    )
+
+
+def build_email(strong, others, stats=None):
     parts = ['<div dir="rtl" style="font-family:Arial,sans-serif;max-width:640px;margin:auto;text-align:right">']
     if strong:
         parts.append("<h2>⭐ מתאימות במיוחד לקורות החיים שלך</h2>")
@@ -359,6 +385,7 @@ def build_email(strong, others):
         parts += [card(j) for j in others]
     if not strong and not others:
         parts.append("<p>לא נמצאו היום משרות חדשות.</p>")
+    parts.append(funnel_line(stats))
     parts.append("</div>")
     return "".join(parts)
 
@@ -385,9 +412,12 @@ def main():
     known = set(seen)
     today = date.today().isoformat()
 
-    all_jobs = fetch_all(companies)
-    cands = [j for j in prefilter(all_jobs) if j["url"] not in known]
+    all_jobs, boards_ok, boards_failed = fetch_all(companies)
+    pre, stats = prefilter(all_jobs)
+    cands = [j for j in pre if j["url"] not in known]
+    stats.update(boards_ok=boards_ok, boards_failed=boards_failed, already_sent=len(pre) - len(cands))
     print(f"Fetched {len(all_jobs)} open jobs -> {len(cands)} new junior candidates")
+    print(f"Funnel: {stats}")
 
     cv_skills = skills_in(cv)
     for j in cands:
@@ -421,7 +451,7 @@ def main():
     else:
         subject = f"אין משרות חדשות היום · {today}"
 
-    send_email(subject, build_email(strong, others))
+    send_email(subject, build_email(strong, others, stats))
     save_seen(seen + [j["url"] for j in new])  # שומרים רק אחרי שהמייל נשלח
     print(f"Sent: {len(strong)} strong, {len(others)} other")
 
